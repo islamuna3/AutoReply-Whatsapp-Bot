@@ -1,0 +1,4 @@
+openai>=2.0,<3
+PyAutoGUI>=0.9.54,<1
+pyperclip>=1.8,<2
+pyinstaller>=6.0,<7

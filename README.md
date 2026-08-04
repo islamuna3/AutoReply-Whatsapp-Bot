@@ -1,5 +1,43 @@
 # WhatsApp AI Chatbot
 
+## Desktop App（Windows / macOS）
+
+桌面版入口是 `desktop_app.py`，主要操作已经集中到 App 内：
+
+- API 服务商、地址、模型和 Key
+- 目标联系人、检查间隔和安全测试模式
+- 五组屏幕坐标的倒计时取点校准
+- AI 人设及输出规则编辑
+- 启动、停止、运行日志和 WhatsApp Web 快捷入口
+
+API Key 只保留在当前 App 进程内，不会写入配置文件。其他配置保存在用户目录下的
+`.autoreply-whatsapp-bot/settings.json`。
+
+### macOS 打包
+
+```bash
+./build_mac.sh
+```
+
+输出：
+
+- `dist/mac/AutoReply WhatsApp Bot.app`
+- `dist/mac/AutoReply-Whatsapp-Bot-macOS-arm64.dmg`
+
+首次运行后需要在“系统设置 → 隐私与安全性 → 辅助功能”中允许本 App 控制鼠标和键盘。
+
+### Windows 打包
+
+在 Windows PowerShell 中执行：
+
+```powershell
+.\build_windows.ps1
+```
+
+输出：`dist\windows\AutoReply-Whatsapp-Bot.exe`。
+
+PyInstaller 需要在目标操作系统本机打包，因此 Windows `.exe` 必须在 Windows 环境生成。
+
 This project implements an AI-powered chatbot that interacts with WhatsApp Web. It uses OpenAI's GPT-3.5 model to generate responses and PyAutoGUI for automating interactions with the WhatsApp Web interface.
 
 ## Components
