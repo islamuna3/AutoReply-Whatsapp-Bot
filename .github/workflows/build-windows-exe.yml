@@ -2,7 +2,7 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [main]
+    branches: [codex/windows-exe-build]
     paths-ignore:
       - "dist/windows/**"
   workflow_dispatch:
@@ -32,6 +32,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f "dist/windows/AutoReply-Whatsapp-Bot.exe"
+          git add -f "dist/windows/AutoReply-Whatsapp-Bot.exe" "dist/windows/Chrome-Extension.zip"
           git commit -m "build: add Windows executable [skip ci]"
           git push

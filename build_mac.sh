@@ -10,6 +10,8 @@ python3 -m PyInstaller --noconfirm --clean --windowed \
   desktop_app.py
 codesign --force --deep --sign - "dist/mac/AutoReply WhatsApp Bot.app"
 cp -R "dist/mac/AutoReply WhatsApp Bot.app" dist/dmg-root/
+cp -R chrome-extension dist/dmg-root/Chrome-Extension
+cp CHROME_EXTENSION_INSTALL.txt dist/dmg-root/
 ln -s /Applications dist/dmg-root/Applications
 hdiutil create -volname "AutoReply WhatsApp Bot" -srcfolder dist/dmg-root \
   -ov -format UDZO "dist/mac/AutoReply-Whatsapp-Bot-macOS-arm64.dmg"

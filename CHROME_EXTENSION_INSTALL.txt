@@ -1,0 +1,10 @@
+AutoReply WhatsApp Bridge 安装步骤
+
+1. 解压 Chrome-Extension.zip（macOS DMG 中直接使用 Chrome-Extension 文件夹）。
+2. Chrome 地址栏打开 chrome://extensions/。
+3. 打开右上角“开发者模式”。
+4. 点击“加载已解压的扩展程序”，选择 Chrome-Extension 文件夹。
+5. 打开桌面 App，填写 API Key，点击“启动扩展服务”。
+6. 打开或刷新 https://web.whatsapp.com/。
+
+默认端口为 8765。扩展选项与桌面 App 的端口必须一致。
