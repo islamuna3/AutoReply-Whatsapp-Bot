@@ -104,8 +104,10 @@
       document.querySelector("[contenteditable='true'][role='textbox'][data-tab]");
     if (!box) throw new Error("WhatsApp input box not found");
     box.focus();
+    // execCommand already emits WhatsApp's input event. Emitting a second
+    // InputEvent with the same data makes some WhatsApp builds insert the
+    // reply twice.
     document.execCommand("insertText", false, reply);
-    box.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: reply }));
     await sleep(250);
     const sendButton = document.querySelector("#main footer [data-testid='compose-btn-send']") ||
       document.querySelector("#main [data-testid='compose-btn-send']") ||
