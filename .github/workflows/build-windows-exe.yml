@@ -2,7 +2,7 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [codex/windows-exe-build]
+    branches: [codex/windows-exe-build-v2]
     paths-ignore:
       - "dist/windows/**"
   workflow_dispatch:
