@@ -20,6 +20,7 @@
 
   function messageNodes() {
     const selectors = [
+      "#main [data-testid^='conv-msg-']",
       "#main div.message-in",
       "#main [data-testid='msg-container'].message-in",
       "#main div[data-id][class*='message-in']"
@@ -28,6 +29,9 @@
     const seen = new Set();
     for (const selector of selectors) {
       document.querySelectorAll(selector).forEach((node) => {
+        // Current WhatsApp Web no longer adds the message-in class. The
+        // stable tail-in marker identifies received messages.
+        if (node.matches("[data-testid^='conv-msg-']") && !node.querySelector("[data-testid='tail-in']")) return;
         if (!seen.has(node)) {
           seen.add(node);
           nodes.push(node);
@@ -105,14 +109,17 @@
 
   async function sendMessage(reply) {
     const box = document.querySelector("#main footer [contenteditable='true'][role='textbox']") ||
-      document.querySelector("#main footer [contenteditable='true']");
+      document.querySelector("#main footer [contenteditable='true']") ||
+      document.querySelector("#main [contenteditable='true'][role='textbox']") ||
+      document.querySelector("[contenteditable='true'][role='textbox'][data-tab]");
     if (!box) throw new Error("WhatsApp input box not found");
     box.focus();
     document.execCommand("insertText", false, reply);
     box.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: reply }));
     await sleep(250);
     const sendButton = document.querySelector("#main footer [data-testid='compose-btn-send']") ||
-      document.querySelector("#main footer button[aria-label='Send'], #main footer button[aria-label='إرسال']");
+      document.querySelector("#main [data-testid='compose-btn-send']") ||
+      document.querySelector("#main button[aria-label='Send'], #main button[aria-label='发送'], #main button[aria-label='إرسال']");
     if (sendButton) {
       sendButton.click();
       return;
