@@ -86,6 +86,14 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIn("attachment", prompt.lower())
 
+    def test_current_time_reaches_model(self):
+        engine = fake_engine()
+        engine.reply({"id": "time-1", "sender": "Ali", "chatTitle": "Ali", "text": "现在几点？"})
+        system_prompts = "\n".join(
+            item["content"] for item in engine.client.chat.completions.kwargs["messages"] if item["role"] == "system"
+        )
+        self.assertIn("当前时间是", system_prompts)
+
     def test_sender_filter(self):
         settings = fake_engine().settings.copy()
         settings["target_sender"] = "Allowed"

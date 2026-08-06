@@ -11,11 +11,13 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from datetime import datetime
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from openai import OpenAI
 
@@ -48,6 +50,7 @@ def load_settings() -> dict:
         "knowledge_base": "",
         "reply_examples": "",
         "forbidden_phrases": "亲；感谢您的咨询；请问还有什么可以帮您",
+        "business_timezone": "Asia/Phnom_Penh",
         "request_timeout": 30,
         "bridge_port": 8765,
         "dry_run": True,
@@ -169,6 +172,12 @@ class ReplyEngine:
             context += "\nSystem note: An attachment was received. Do not claim to see its contents; acknowledge naturally."
             self.log(f"「{chat}」收到{media_type}附件。")
         self.log(f"正在回复「{chat}」的消息……")
+        timezone_name = self.settings.get("business_timezone", "Asia/Phnom_Penh")
+        try:
+            current_time = datetime.now(ZoneInfo(timezone_name))
+        except ZoneInfoNotFoundError:
+            current_time = datetime.now().astimezone()
+        time_context = current_time.strftime("%Y-%m-%d %H:%M:%S %A")
         completion = self.client.chat.completions.create(
             model=self.settings["model"],
             messages=[
@@ -179,6 +188,7 @@ class ReplyEngine:
                 {"role": "system", "content": f"业务知识/喂养内容：\n{self.settings.get('knowledge_base', '')}"},
                 {"role": "system", "content": f"模仿以下真实对话示例的风格，不要照抄内容：\n{self.settings.get('reply_examples', '')}"},
                 {"role": "system", "content": f"禁止使用这些机械化表达：{self.settings.get('forbidden_phrases', '')}"},
+                {"role": "system", "content": f"当前时间是 {time_context}，时区 {timezone_name}。对方询问时间、日期、今天、明天时必须以此为准，不得猜测。"},
                 {"role": "user", "content": context},
             ],
             max_tokens=400,
@@ -341,6 +351,7 @@ class DesktopApp(tk.Tk):
         self._field(form, 0, "回复语气", "reply_tone", self.settings["reply_tone"])
         self._field(form, 1, "与对方的关系", "relationship", self.settings["relationship"])
         self._field(form, 2, "禁止词/机械话术", "forbidden_phrases", self.settings["forbidden_phrases"])
+        self._field(form, 3, "业务时区", "business_timezone", self.settings["business_timezone"])
         ttk.Label(parent, text="业务知识/喂养内容（产品、价格、人物关系、习惯等）").pack(anchor="w", pady=(6, 0))
         self.knowledge_base = scrolledtext.ScrolledText(parent, height=4)
         self.knowledge_base.pack(fill="x")
@@ -381,6 +392,7 @@ class DesktopApp(tk.Tk):
             "reply_tone": self.vars["reply_tone"].get().strip(),
             "relationship": self.vars["relationship"].get().strip(),
             "forbidden_phrases": self.vars["forbidden_phrases"].get().strip(),
+            "business_timezone": self.vars["business_timezone"].get().strip(),
             "knowledge_base": self.knowledge_base.get("1.0", "end").strip(),
             "reply_examples": self.reply_examples.get("1.0", "end").strip(),
             "request_timeout": timeout,
