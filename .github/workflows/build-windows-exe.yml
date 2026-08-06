@@ -35,3 +35,5 @@ jobs:
           git add -f "dist/windows/AutoReply-Whatsapp-Bot.exe"
           git commit -m "build: add Windows executable [skip ci]"
           git push
+
+# Build revision: media-arabic-fix-v2
