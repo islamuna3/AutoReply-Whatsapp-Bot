@@ -9,8 +9,21 @@ import queue
 import re
 import threading
 import time
-import tkinter as tk
 from pathlib import Path
+
+# Windows display scaling (125%/150%/200%) otherwise makes captured coordinates
+# and PyAutoGUI click coordinates use different coordinate systems.
+if platform.system() == "Windows":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 import pyautogui
@@ -154,6 +167,27 @@ class BotWorker(threading.Thread):
         elif name == "press":
             pyautogui.press(*args)
 
+    def activate_browser(self, fallback_coord) -> None:
+        """Activate an existing WhatsApp/Chrome window; fall back to taskbar coordinate."""
+        if platform.system() == "Windows" and not self.s["dry_run"]:
+            try:
+                import pygetwindow
+                windows = [
+                    w for w in pygetwindow.getAllWindows()
+                    if getattr(w, "visible", True)
+                    and ("whatsapp" in (w.title or "").lower() or "chrome" in (w.title or "").lower())
+                ]
+                if windows:
+                    window = max(windows, key=lambda w: max(0, w.width) * max(0, w.height))
+                    if window.isMinimized:
+                        window.restore()
+                    window.activate()
+                    self.log(f"已自动激活浏览器窗口：{window.title}")
+                    return
+            except Exception as exc:
+                self.log(f"自动激活浏览器失败，改用任务栏坐标：{exc}")
+        self.action("click", *fallback_coord)
+
     def run(self) -> None:
         pyautogui.PAUSE = 0.3
         pyautogui.FAILSAFE = True
@@ -169,10 +203,13 @@ class BotWorker(threading.Thread):
             coords = self.s["coords"]
             mod = "cmd" if platform.system() == "Darwin" else "ctrl"
             self.log(f"机器人已启动：{self.s['provider']} / {self.s['model']}")
+            if platform.system() == "Windows":
+                width, height = pyautogui.size()
+                self.log(f"Windows DPI 适配已启用；当前可用屏幕坐标：{width} × {height}")
             self.log("安全测试模式开启，不会发送消息。" if self.s["dry_run"] else "5 秒后开始操作 WhatsApp Web。")
             if self.wait(1 if self.s["dry_run"] else 5):
                 return
-            self.action("click", *coords["CHROME_ICON"])
+            self.activate_browser(coords["CHROME_ICON"])
             if self.wait(1):
                 return
             last_handled = None
@@ -183,8 +220,10 @@ class BotWorker(threading.Thread):
                 if self.wait(float(self.s["check_interval"])):
                     break
                 self.action("drag", *coords["CHAT_SELECT_TL"], *coords["CHAT_SELECT_BR"])
+                if not self.s["dry_run"]:
+                    pyperclip.copy("")
                 self.action("hotkey", mod, "c")
-                if self.wait(1.2):
+                if self.wait(2.0 if platform.system() == "Windows" else 1.2):
                     break
                 self.action("click", *coords["LAST_MSG_CLICK"])
                 clipboard = pyperclip.paste()
@@ -224,7 +263,11 @@ class BotWorker(threading.Thread):
                 if not self.s["dry_run"]:
                     pyperclip.copy(reply)
                 self.action("click", *coords["INPUT_BOX"])
+                if self.wait(0.5):
+                    break
                 self.action("hotkey", mod, "v")
+                if self.wait(0.7):
+                    break
                 self.action("press", "enter")
                 self.log("已发送。" if not self.s["dry_run"] else "安全测试完成，未实际发送。")
         except pyautogui.FailSafeException:
