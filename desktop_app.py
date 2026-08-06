@@ -7,7 +7,6 @@ import os
 import platform
 import queue
 import re
-import subprocess
 import threading
 import time
 import tkinter as tk
@@ -25,7 +24,14 @@ APP_NAME = "AutoReply WhatsApp Bot"
 APP_DIR = Path.home() / ".autoreply-whatsapp-bot"
 SETTINGS_FILE = APP_DIR / "settings.json"
 COORD_NAMES = ["CHROME_ICON", "CHAT_SELECT_TL", "CHAT_SELECT_BR", "LAST_MSG_CLICK", "INPUT_BOX"]
-TIMESTAMP_RE = re.compile(r"\[\d{1,2}:\d{2}\s*(?:[AP]M)?,?\s*\d{1,2}/\d{1,2}/\d{2,4}\]")
+TIMESTAMP_RE = re.compile(r"\[[^\]\r\n]{0,80}\d[^\]\r\n]{0,80}\]", re.UNICODE)
+BIDI_MARKS_RE = re.compile(r"[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+MEDIA_RE = re.compile(
+    r"(?:<\s*media omitted\s*>|image omitted|video omitted|gif omitted|sticker omitted|"
+    r"تم حذف الوسائط|تم إرفاق صورة|تم إرفاق فيديو|صورة مرفقة|فيديو مرفق|"
+    r"الصورة غير متوفرة|الفيديو غير متوفر|\ufffc)",
+    re.IGNORECASE,
+)
 
 
 def load_settings() -> dict:
@@ -36,6 +42,8 @@ def load_settings() -> dict:
         "target_sender": defaults.TARGET_SENDER,
         "check_interval": defaults.CHECK_INTERVAL,
         "drag_duration": defaults.SELECT_DRAG_DURATION,
+        "max_context_chars": 6000,
+        "request_timeout": 30,
         "dry_run": True,
         "coords": defaults.COORDS,
         "persona": defaults.PERSONA.strip(),
@@ -54,12 +62,59 @@ def save_settings(data: dict) -> None:
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
 
 
+def normalize_text(text: str) -> str:
+    """Normalize RTL controls and media placeholders from WhatsApp clipboard text."""
+    text = BIDI_MARKS_RE.sub("", text or "").replace("\x00", "")
+    text = MEDIA_RE.sub("[MEDIA_ATTACHMENT]", text)
+    text = re.sub(
+        r"(?im)^\s*(?:image|photo|video|gif|sticker|صورة|فيديو|ملصق)\s*$",
+        "[MEDIA_ATTACHMENT]",
+        text,
+    )
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def split_messages(chat_log: str) -> list[str]:
+    """Split copied WhatsApp text for Latin and Arabic locale timestamps."""
+    log = normalize_text(chat_log)
+    parts = [part.strip() for part in TIMESTAMP_RE.split(log) if part.strip()]
+    return parts or ([log] if log else [])
+
+
+def last_message(chat_log: str) -> str:
+    messages = split_messages(chat_log)
+    return messages[-1] if messages else ""
+
+
 def is_last_message_from_sender(chat_log: str, sender: str) -> bool:
-    messages = [part.strip() for part in TIMESTAMP_RE.split(chat_log.strip()) if part.strip()]
-    if not messages:
+    last = last_message(chat_log)
+    sender = normalize_text(sender)
+    if not last or not sender:
         return False
-    last = messages[-1]
-    return last.startswith(sender + ":") or last.startswith(sender + " ") or last == sender
+    return bool(re.match(rf"^{re.escape(sender)}\s*(?::|：|\u061b|\s)", last)) or last == sender
+
+
+def bounded_chat_history(chat_log: str, max_chars: int, max_messages: int = 16) -> tuple[str, bool]:
+    """Keep recent context only so long Arabic chats cannot block the API."""
+    max_chars = max(1000, int(max_chars))
+    messages = split_messages(chat_log)
+    recent = messages[-max_messages:]
+    result = "\n".join(recent)
+    truncated = len(messages) > len(recent) or len(result) > max_chars
+    if len(result) > max_chars:
+        result = result[-max_chars:]
+    media_count = result.count("[MEDIA_ATTACHMENT]")
+    if media_count:
+        result += (
+            f"\n\nSystem note: the recent chat contains {media_count} image/video attachment(s). "
+            "The attachment pixels are unavailable; acknowledge naturally without claiming to see their contents."
+        )
+    return result, truncated
+
+
+def message_fingerprint(chat_log: str) -> str:
+    import hashlib
+    return hashlib.sha256(last_message(chat_log).encode("utf-8", "replace")).hexdigest()
 
 
 def clean_reply(text: str) -> str:
@@ -103,7 +158,11 @@ class BotWorker(threading.Thread):
         pyautogui.PAUSE = 0.3
         pyautogui.FAILSAFE = True
         try:
-            kwargs = {"api_key": self.api_key}
+            kwargs = {
+                "api_key": self.api_key,
+                "timeout": float(self.s["request_timeout"]),
+                "max_retries": 0,
+            }
             if self.s["base_url"]:
                 kwargs["base_url"] = self.s["base_url"]
             client = OpenAI(**kwargs)
@@ -128,29 +187,39 @@ class BotWorker(threading.Thread):
                 if self.wait(1.2):
                     break
                 self.action("click", *coords["LAST_MSG_CLICK"])
-                chat = pyperclip.paste() or ""
+                clipboard = pyperclip.paste()
+                chat = clipboard if isinstance(clipboard, str) else ""
                 if not chat.strip() or not is_last_message_from_sender(chat, self.s["target_sender"]):
                     self.log("没有检测到目标联系人的新消息。")
                     continue
-                parts = [x.strip() for x in TIMESTAMP_RE.split(chat) if x.strip()]
-                last = parts[-1] if parts else chat.strip()
-                if last == last_handled:
+                fingerprint = message_fingerprint(chat)
+                if fingerprint == last_handled:
                     self.log("这条消息已经处理，等待新消息。")
                     continue
-                last_handled = last
+                prompt_chat, truncated = bounded_chat_history(chat, self.s["max_context_chars"])
+                if truncated:
+                    self.log(f"聊天内容较长，已限制为最近 {self.s['max_context_chars']} 个字符。")
+                if "[MEDIA_ATTACHMENT]" in prompt_chat:
+                    self.log("检测到图片或视频，已转换为附件占位，不读取媒体文件。")
                 self.log("正在生成回复……")
-                completion = client.chat.completions.create(
-                    model=self.s["model"],
-                    messages=[
-                        {"role": "system", "content": self.s["persona"]},
-                        {"role": "system", "content": self.s["task_rules"]},
-                        {"role": "user", "content": chat},
-                    ],
-                )
+                try:
+                    completion = client.chat.completions.create(
+                        model=self.s["model"],
+                        messages=[
+                            {"role": "system", "content": self.s["persona"]},
+                            {"role": "system", "content": self.s["task_rules"]},
+                            {"role": "user", "content": prompt_chat},
+                        ],
+                        max_tokens=400,
+                    )
+                except Exception as exc:
+                    self.log(f"AI 调用失败或超时，本轮跳过，机器人继续运行：{exc}")
+                    continue
                 reply = clean_reply(completion.choices[0].message.content)
                 if not reply:
                     self.log("AI 返回空内容，本轮跳过。")
                     continue
+                last_handled = fingerprint
                 self.log(f"回复：{reply}")
                 if not self.s["dry_run"]:
                     pyperclip.copy(reply)
@@ -229,10 +298,12 @@ class DesktopApp(tk.Tk):
         self._field(parent, 4, "目标联系人", "target_sender", self.settings["target_sender"])
         self._field(parent, 5, "检查间隔（秒）", "check_interval", str(self.settings["check_interval"]))
         self._field(parent, 6, "拖选时长（秒）", "drag_duration", str(self.settings["drag_duration"]))
+        self._field(parent, 7, "最长上下文（字符）", "max_context_chars", str(self.settings["max_context_chars"]))
+        self._field(parent, 8, "AI 超时（秒）", "request_timeout", str(self.settings["request_timeout"]))
         dry = tk.BooleanVar(value=self.settings["dry_run"])
         self.vars["dry_run"] = dry
-        ttk.Checkbutton(parent, text="安全测试模式（不发送消息）", variable=dry).grid(row=7, column=1, sticky="w", pady=10)
-        ttk.Label(parent, text="首次使用请先保持安全测试模式，完成坐标校准后再关闭。", foreground="#9a6700").grid(row=8, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(parent, text="安全测试模式（不发送消息）", variable=dry).grid(row=9, column=1, sticky="w", pady=10)
+        ttk.Label(parent, text="长阿拉伯文自动截断；图片/视频使用附件占位；超时后继续下一轮。", foreground="#9a6700").grid(row=10, column=0, columnspan=2, sticky="w")
 
     def _build_coords(self, parent):
         parent.columnconfigure(1, weight=1)
@@ -271,13 +342,27 @@ class DesktopApp(tk.Tk):
             if len(parts) != 2:
                 raise ValueError(f"{name} 坐标必须是 x, y")
             coords[name] = parts
+        check_interval = float(self.vars["check_interval"].get())
+        drag_duration = float(self.vars["drag_duration"].get())
+        max_context_chars = int(self.vars["max_context_chars"].get())
+        request_timeout = float(self.vars["request_timeout"].get())
+        if not 1 <= check_interval <= 3600:
+            raise ValueError("检查间隔必须在 1 至 3600 秒之间。")
+        if not 0.2 <= drag_duration <= 10:
+            raise ValueError("拖选时长必须在 0.2 至 10 秒之间。")
+        if not 1000 <= max_context_chars <= 30000:
+            raise ValueError("最长上下文必须在 1000 至 30000 字符之间。")
+        if not 5 <= request_timeout <= 180:
+            raise ValueError("AI 超时必须在 5 至 180 秒之间。")
         return {
             "provider": self.vars["provider"].get().strip(),
             "base_url": self.vars["base_url"].get().strip(),
             "model": self.vars["model"].get().strip(),
             "target_sender": self.vars["target_sender"].get().strip(),
-            "check_interval": float(self.vars["check_interval"].get()),
-            "drag_duration": float(self.vars["drag_duration"].get()),
+            "check_interval": check_interval,
+            "drag_duration": drag_duration,
+            "max_context_chars": max_context_chars,
+            "request_timeout": request_timeout,
             "dry_run": bool(self.vars["dry_run"].get()),
             "coords": coords,
             "persona": self.persona.get("1.0", "end").strip(),
