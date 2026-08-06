@@ -2,10 +2,11 @@
   "use strict";
 
   const processed = new Set();
-  const inflight = new Set();
   let initialized = false;
   let switchingChat = false;
+  let processing = false;
   let pendingUnreadCount = 0;
+  let scanTimer = null;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -19,26 +20,15 @@
   }
 
   function messageNodes() {
-    const selectors = [
-      "#main [data-testid^='conv-msg-']",
-      "#main div.message-in",
-      "#main [data-testid='msg-container'].message-in",
-      "#main div[data-id][class*='message-in']"
-    ];
-    const nodes = [];
-    const seen = new Set();
-    for (const selector of selectors) {
-      document.querySelectorAll(selector).forEach((node) => {
-        // Current WhatsApp Web no longer adds the message-in class. The
-        // stable tail-in marker identifies received messages.
-        if (node.matches("[data-testid^='conv-msg-']") && !node.querySelector("[data-testid='tail-in']")) return;
-        if (!seen.has(node)) {
-          seen.add(node);
-          nodes.push(node);
-        }
-      });
+    const rows = [...document.querySelectorAll("#main [data-testid^='conv-msg-']")];
+    const incoming = [];
+    let direction = "";
+    for (const row of rows) {
+      if (row.querySelector("[data-testid='tail-in']")) direction = "in";
+      else if (row.querySelector("[data-testid='tail-out']")) direction = "out";
+      if (direction === "in") incoming.push(row);
     }
-    return nodes;
+    return incoming;
   }
 
   function getChatTitle() {
@@ -128,20 +118,23 @@
     box.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
   }
 
-  async function processNode(node) {
-    const payload = parseNode(node);
-    if ((!payload.text && !payload.mediaType) || processed.has(payload.id) || inflight.has(payload.id)) return;
-    inflight.add(payload.id);
+  async function processBatch(nodes) {
+    const items = nodes.map(parseNode).filter((item) => (item.text || item.mediaType) && !processed.has(item.id));
+    if (!items.length || processing) return;
+    processing = true;
+    const payload = { ...items[items.length - 1] };
+    payload.text = items.map((item) => item.text || `[${item.mediaType}]`).join("\n");
+    payload.mediaType = items.map((item) => item.mediaType).filter(Boolean).join(",");
     try {
       const result = await requestReply(payload);
       if (result.ok) {
-        processed.add(payload.id);
+        items.forEach((item) => processed.add(item.id));
         if (result.send && result.reply) await sendMessage(result.reply);
       }
     } catch (error) {
       console.debug("AutoReply bridge retry pending:", error.message);
     } finally {
-      inflight.delete(payload.id);
+      processing = false;
     }
   }
 
@@ -151,41 +144,49 @@
   }
 
   async function openNextUnreadChat() {
-    if (switchingChat || inflight.size) return;
+    if (switchingChat || processing) return;
     const row = unreadChatRow();
     if (!row) return;
     const badge = row.querySelector("[data-testid='icon-unread-count']");
     pendingUnreadCount = Math.max(1, Math.min(20, Number((badge?.textContent || "1").trim()) || 1));
-    const target = row.querySelector("[role='gridcell']") || row;
+    const target = row.querySelector("[data-testid='cell-frame-container']") || row.querySelector("[role='gridcell']") || row;
     switchingChat = true;
+    target.scrollIntoView({ block: "nearest" });
     target.click();
     await sleep(900);
     switchingChat = false;
-    scan();
+    scheduleScan(100);
   }
 
-  function scan() {
-    if (switchingChat) return;
+  async function scan() {
+    if (switchingChat || processing) return;
     const nodes = messageNodes();
     if (!initialized) {
       nodes.forEach((node) => processed.add(parseNode(node).id));
       initialized = true;
-      console.info("AutoReply WhatsApp Bridge ready; existing messages ignored.");
+      console.info("AutoReply WhatsApp Bridge v2.1.0 ready; existing messages ignored.");
+      openNextUnreadChat();
       return;
     }
     if (pendingUnreadCount) {
       const count = pendingUnreadCount;
       pendingUnreadCount = 0;
-      nodes.slice(-count).forEach((node) => processNode(node));
+      await processBatch(nodes.slice(-count));
+      openNextUnreadChat();
       return;
     }
-    nodes.slice(-8).forEach((node) => processNode(node));
+    await processBatch(nodes.slice(-8));
     openNextUnreadChat();
   }
 
-  setTimeout(scan, 2000);
+  function scheduleScan(delay = 500) {
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(scan, delay);
+  }
+
+  scheduleScan(2000);
   setTimeout(reportReady, 1000);
-  new MutationObserver(() => scan()).observe(document.documentElement, { childList: true, subtree: true });
-  setInterval(scan, 4000);
+  new MutationObserver(() => scheduleScan()).observe(document.documentElement, { childList: true, subtree: true });
+  setInterval(() => scheduleScan(0), 4000);
   setInterval(reportReady, 10000);
 })();
