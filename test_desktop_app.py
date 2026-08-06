@@ -45,6 +45,8 @@ def fake_engine(settings=None):
         "persona": "reply naturally",
         "task_rules": "plain text only",
         "dry_run": False,
+        "reply_delay_seconds": 0,
+        "history_messages": 40,
     }
     engine.log = lambda *_: None
     engine.client = _Client()

@@ -25,6 +25,7 @@ import config as defaults
 APP_NAME = "AutoReply WhatsApp Bot"
 APP_DIR = Path.home() / ".autoreply-whatsapp-bot"
 SETTINGS_FILE = APP_DIR / "settings.json"
+HISTORY_FILE = APP_DIR / "conversation-history.json"
 BIDI_MARKS_RE = re.compile(r"[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 MEDIA_RE = re.compile(
     r"(?:<\s*media omitted\s*>|image omitted|video omitted|gif omitted|sticker omitted|"
@@ -40,6 +41,13 @@ def load_settings() -> dict:
         "model": defaults.MODEL,
         "target_sender": "",
         "max_context_chars": 6000,
+        "history_messages": 40,
+        "reply_delay_seconds": 4,
+        "reply_tone": "自然、亲切，像真人聊天，不要客服腔",
+        "relationship": "根据对方的语气自然调整亲疏程度",
+        "knowledge_base": "",
+        "reply_examples": "",
+        "forbidden_phrases": "亲；感谢您的咨询；请问还有什么可以帮您",
         "request_timeout": 30,
         "bridge_port": 8765,
         "dry_run": True,
@@ -74,9 +82,9 @@ def clean_reply(text: str) -> str:
     return text
 
 
-def bounded_context(messages: list[str], max_chars: int) -> tuple[str, bool]:
-    result = "\n".join(messages[-16:])
-    truncated = len(messages) > 16 or len(result) > max_chars
+def bounded_context(messages: list[str], max_chars: int, max_messages: int = 16) -> tuple[str, bool]:
+    result = "\n".join(messages[-max_messages:])
+    truncated = len(messages) > max_messages or len(result) > max_chars
     if len(result) > max_chars:
         result = result[-max_chars:]
     return result, truncated
@@ -94,9 +102,35 @@ class ReplyEngine:
         self.client = OpenAI(**kwargs)
         self.settings = settings
         self.log = log
-        self.history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=32))
+        history_limit = max(20, int(settings.get("history_messages", 40)) * 2)
+        self.history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=history_limit))
+        self.history_file = HISTORY_FILE
+        self._load_history(history_limit)
         self.processed: dict[str, float] = {}
         self.lock = threading.Lock()
+
+    def _load_history(self, history_limit: int):
+        try:
+            saved = json.loads(self.history_file.read_text("utf-8"))
+            for chat, messages in saved.items():
+                if isinstance(chat, str) and isinstance(messages, list):
+                    self.history[chat] = deque((str(item) for item in messages[-history_limit:]), maxlen=history_limit)
+            self.log(f"已加载 {len(self.history)} 个会话的本地记忆。")
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+    def _save_history(self):
+        history_file = getattr(self, "history_file", None)
+        if not history_file:
+            return
+        try:
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            history_file.write_text(
+                json.dumps({chat: list(messages) for chat, messages in self.history.items()}, ensure_ascii=False, indent=2),
+                "utf-8",
+            )
+        except OSError as exc:
+            self.log(f"会话记忆保存失败：{exc}")
 
     def _cleanup(self):
         cutoff = time.time() - 3600
@@ -123,7 +157,12 @@ class ReplyEngine:
             text = "[MEDIA_ATTACHMENT: unknown]"
         line = f"{sender or 'Customer'}: {text}"
         self.history[chat].append(line)
-        context, truncated = bounded_context(list(self.history[chat]), int(self.settings["max_context_chars"]))
+        self._save_history()
+        context, truncated = bounded_context(
+            list(self.history[chat]),
+            int(self.settings["max_context_chars"]),
+            int(self.settings.get("history_messages", 40)),
+        )
         if truncated:
             self.log(f"「{chat}」内容较长，已保留最近 16 条并截断。")
         if media_type:
@@ -135,6 +174,11 @@ class ReplyEngine:
             messages=[
                 {"role": "system", "content": self.settings["persona"]},
                 {"role": "system", "content": self.settings["task_rules"]},
+                {"role": "system", "content": f"回复语气：{self.settings.get('reply_tone', '')}"},
+                {"role": "system", "content": f"与对方的关系：{self.settings.get('relationship', '')}"},
+                {"role": "system", "content": f"业务知识/喂养内容：\n{self.settings.get('knowledge_base', '')}"},
+                {"role": "system", "content": f"模仿以下真实对话示例的风格，不要照抄内容：\n{self.settings.get('reply_examples', '')}"},
+                {"role": "system", "content": f"禁止使用这些机械化表达：{self.settings.get('forbidden_phrases', '')}"},
                 {"role": "user", "content": context},
             ],
             max_tokens=400,
@@ -143,9 +187,14 @@ class ReplyEngine:
         if not reply:
             return {"ok": False, "error": "AI returned an empty reply", "send": False}
         self.history[chat].append(f"Assistant: {reply}")
+        self._save_history()
         with self.lock:
             self.processed[message_id] = time.time()
         self.log(f"回复「{chat}」：{reply}")
+        delay = max(0.0, min(60.0, float(self.settings.get("reply_delay_seconds", 4))))
+        if delay:
+            self.log(f"等待 {delay:g} 秒后发送，避免回复过快。")
+            time.sleep(delay)
         return {"ok": True, "reply": reply, "send": not self.settings["dry_run"]}
 
 
@@ -272,29 +321,51 @@ class DesktopApp(tk.Tk):
         self._field(parent, 3, "API Key（不保存）", "api_key", "", "•")
         self._field(parent, 4, "指定发送者（留空=全部）", "target_sender", self.settings["target_sender"])
         self._field(parent, 5, "最长上下文（字符）", "max_context_chars", self.settings["max_context_chars"])
-        self._field(parent, 6, "AI 超时（秒）", "request_timeout", self.settings["request_timeout"])
-        self._field(parent, 7, "扩展服务端口", "bridge_port", self.settings["bridge_port"])
+        self._field(parent, 6, "记忆消息数", "history_messages", self.settings["history_messages"])
+        self._field(parent, 7, "回复延迟（秒）", "reply_delay_seconds", self.settings["reply_delay_seconds"])
+        self._field(parent, 8, "AI 超时（秒）", "request_timeout", self.settings["request_timeout"])
+        self._field(parent, 9, "扩展服务端口", "bridge_port", self.settings["bridge_port"])
         dry = tk.BooleanVar(value=self.settings["dry_run"])
         self.vars["dry_run"] = dry
-        ttk.Checkbutton(parent, text="安全测试模式（生成回复但不发送）", variable=dry).grid(row=8, column=1, sticky="w", pady=8)
-        ttk.Label(parent, text="先在 Chrome 扩展管理页加载项目中的 chrome-extension 文件夹，然后启动扩展服务。", foreground="#9a6700", wraplength=720).grid(row=9, column=0, columnspan=2, sticky="w", pady=8)
+        ttk.Checkbutton(parent, text="安全测试模式（生成回复但不发送）", variable=dry).grid(row=10, column=1, sticky="w", pady=8)
+        ttk.Label(parent, text="会话记忆保存在本机；重启 App 后仍会继续记得。", foreground="#9a6700", wraplength=720).grid(row=11, column=0, columnspan=2, sticky="w", pady=8)
 
     def _build_prompts(self, parent):
-        ttk.Label(parent, text="机器人人设").pack(anchor="w")
-        self.persona = scrolledtext.ScrolledText(parent, height=15)
-        self.persona.pack(fill="both", expand=True, pady=(4, 10))
+        ttk.Label(parent, text="机器人人设（身份、性格、说话习惯）").pack(anchor="w")
+        self.persona = scrolledtext.ScrolledText(parent, height=5)
+        self.persona.pack(fill="x", pady=(4, 8))
         self.persona.insert("1.0", self.settings["persona"])
-        ttk.Label(parent, text="输出规则").pack(anchor="w")
-        self.rules = scrolledtext.ScrolledText(parent, height=8)
+        form = ttk.Frame(parent)
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+        self._field(form, 0, "回复语气", "reply_tone", self.settings["reply_tone"])
+        self._field(form, 1, "与对方的关系", "relationship", self.settings["relationship"])
+        self._field(form, 2, "禁止词/机械话术", "forbidden_phrases", self.settings["forbidden_phrases"])
+        ttk.Label(parent, text="业务知识/喂养内容（产品、价格、人物关系、习惯等）").pack(anchor="w", pady=(6, 0))
+        self.knowledge_base = scrolledtext.ScrolledText(parent, height=4)
+        self.knowledge_base.pack(fill="x")
+        self.knowledge_base.insert("1.0", self.settings["knowledge_base"])
+        ttk.Label(parent, text="真实对话示例（一问一答，AI 会模仿语气）").pack(anchor="w", pady=(6, 0))
+        self.reply_examples = scrolledtext.ScrolledText(parent, height=4)
+        self.reply_examples.pack(fill="x")
+        self.reply_examples.insert("1.0", self.settings["reply_examples"])
+        ttk.Label(parent, text="输出规则").pack(anchor="w", pady=(6, 0))
+        self.rules = scrolledtext.ScrolledText(parent, height=4)
         self.rules.pack(fill="both", expand=True)
         self.rules.insert("1.0", self.settings["task_rules"])
 
     def collect(self):
         max_chars = int(self.vars["max_context_chars"].get())
+        history_messages = int(self.vars["history_messages"].get())
+        reply_delay = float(self.vars["reply_delay_seconds"].get())
         timeout = float(self.vars["request_timeout"].get())
         port = int(self.vars["bridge_port"].get())
         if not 1000 <= max_chars <= 30000:
             raise ValueError("最长上下文必须在 1000 至 30000 之间。")
+        if not 10 <= history_messages <= 100:
+            raise ValueError("记忆消息数必须在 10 至 100 之间。")
+        if not 0 <= reply_delay <= 60:
+            raise ValueError("回复延迟必须在 0 至 60 秒之间。")
         if not 5 <= timeout <= 180:
             raise ValueError("AI 超时必须在 5 至 180 秒之间。")
         if not 1024 <= port <= 65535:
@@ -305,6 +376,13 @@ class DesktopApp(tk.Tk):
             "model": self.vars["model"].get().strip(),
             "target_sender": self.vars["target_sender"].get().strip(),
             "max_context_chars": max_chars,
+            "history_messages": history_messages,
+            "reply_delay_seconds": reply_delay,
+            "reply_tone": self.vars["reply_tone"].get().strip(),
+            "relationship": self.vars["relationship"].get().strip(),
+            "forbidden_phrases": self.vars["forbidden_phrases"].get().strip(),
+            "knowledge_base": self.knowledge_base.get("1.0", "end").strip(),
+            "reply_examples": self.reply_examples.get("1.0", "end").strip(),
             "request_timeout": timeout,
             "bridge_port": port,
             "dry_run": bool(self.vars["dry_run"].get()),
