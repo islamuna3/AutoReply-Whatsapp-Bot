@@ -156,6 +156,7 @@ class BridgeServer:
         self.engine = ReplyEngine(settings, api_key, self.log)
         self.httpd = None
         self.thread = None
+        self.extension_connected = False
 
     def log(self, message: str):
         self.output.put(message)
@@ -183,6 +184,9 @@ class BridgeServer:
 
             def do_GET(self):
                 if urlparse(self.path).path == "/v1/status":
+                    if not getattr(bridge, "extension_connected", False):
+                        bridge.extension_connected = True
+                        bridge.log("已检测到 Chrome 扩展连接，正在监听新消息。")
                     self._write({"ok": True, "running": True, "dryRun": bridge.settings["dry_run"]})
                 else:
                     self._write({"ok": False, "error": "not found"}, 404)

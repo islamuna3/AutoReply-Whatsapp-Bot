@@ -4,6 +4,8 @@
   const processed = new Set();
   const inflight = new Set();
   let initialized = false;
+  let switchingChat = false;
+  let pendingUnreadCount = 0;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -92,6 +94,15 @@
     }
   }
 
+  async function reportReady() {
+    try {
+      const port = await bridgePort();
+      await fetch(`http://127.0.0.1:${port}/v1/status`);
+    } catch (_) {
+      // The desktop service may be started after WhatsApp Web; the timer retries.
+    }
+  }
+
   async function sendMessage(reply) {
     const box = document.querySelector("#main footer [contenteditable='true'][role='textbox']") ||
       document.querySelector("#main footer [contenteditable='true']");
@@ -127,7 +138,27 @@
     }
   }
 
+  function unreadChatRow() {
+    const badge = document.querySelector("[role='grid'] [data-testid='icon-unread-count']");
+    return badge?.closest("[role='row']") || null;
+  }
+
+  async function openNextUnreadChat() {
+    if (switchingChat || inflight.size) return;
+    const row = unreadChatRow();
+    if (!row) return;
+    const badge = row.querySelector("[data-testid='icon-unread-count']");
+    pendingUnreadCount = Math.max(1, Math.min(20, Number((badge?.textContent || "1").trim()) || 1));
+    const target = row.querySelector("[role='gridcell']") || row;
+    switchingChat = true;
+    target.click();
+    await sleep(900);
+    switchingChat = false;
+    scan();
+  }
+
   function scan() {
+    if (switchingChat) return;
     const nodes = messageNodes();
     if (!initialized) {
       nodes.forEach((node) => processed.add(parseNode(node).id));
@@ -135,10 +166,19 @@
       console.info("AutoReply WhatsApp Bridge ready; existing messages ignored.");
       return;
     }
+    if (pendingUnreadCount) {
+      const count = pendingUnreadCount;
+      pendingUnreadCount = 0;
+      nodes.slice(-count).forEach((node) => processNode(node));
+      return;
+    }
     nodes.slice(-8).forEach((node) => processNode(node));
+    openNextUnreadChat();
   }
 
   setTimeout(scan, 2000);
+  setTimeout(reportReady, 1000);
   new MutationObserver(() => scan()).observe(document.documentElement, { childList: true, subtree: true });
   setInterval(scan, 4000);
+  setInterval(reportReady, 10000);
 })();
